@@ -51,6 +51,9 @@ io_scene_nifly/
 # PyNifly is external - users must download separately
 converter/src/pynifly/
 
+# Tools folder (hkxcmd, hkxpack) - users must download separately
+converter/tools/
+
 # Test/Output Files
 converter/output/
 converter/test_output/
