@@ -1,0 +1,86 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec.bak
+converter/build/
+converter/dist/
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# External Dependencies (NOT part of this project)
+# io_scene_nifly folder is external Blender addon - we don't track it
+io_scene_nifly/
+
+# PyNifly is external - users must download separately
+converter/src/pynifly/
+
+# Test/Output Files
+converter/output/
+converter/test_output/
+*.XMODEL_EXPORT
+*.XMODEL_BIN
+*.xmodel_bin
+*.xanim_export
+*_materials.json
+*.tmp
+*.bak
+*.backup
+
+# Examples (user-generated examples, not part of repo)
+EXAMPLES/
+
+# Config (user-specific)
+converter/config/settings.json
+
+# Temporary/Test Files
+*.tmp
+*.bak
+*.backup
+test_*.py
+debug_*.py
+
+# Examples (optional - uncomment if you don't want to include examples)
+# EXAMPLES/
+
+# Build artifacts
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/

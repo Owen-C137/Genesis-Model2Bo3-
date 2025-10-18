@@ -1,0 +1,21 @@
+# Fallout 4 to Black Ops 3 Converter - Dependencies
+
+# GUI Framework
+PyQt6>=6.6.0
+
+# NIF File Parsing (Fallout 4 models)
+pynifly>=0.12.0
+PyFFI>=2.2.4.dev3
+
+# Mathematics and Array Operations
+numpy>=1.24.0
+
+# Image Processing (for texture conversion)
+Pillow>=10.0.0
+
+# For future HKX animation support
+# Note: HKX conversion will use external hkxcmd.exe tool
+
+# Additional utilities
+# For packaging the app later:
+# pyinstaller>=6.0.0
