@@ -2,6 +2,8 @@
 
 ![Model2Bo3](converter/genesis_text.png)
 
+> **Development Note:** This tool was developed with the assistance of **GitHub Copilot**, an AI-powered coding assistant. Copilot helped accelerate development, implement complex features, and create comprehensive documentation.
+
 Convert game models from various formats to Call of Duty Black Ops 3 format (XMODEL_EXPORT) with automatic texture handling, material preservation, and folder structure management.
 
 **Currently Supports:**
