@@ -14,10 +14,111 @@ Convert game models from various formats to Call of Duty Black Ops 3 format (XMO
 
 ## 🚀 Quick Start
 
-1. **Launch** `Model2Bo3.exe`
-2. **Select** your model file (NIF, etc.)
-3. **Choose** output directory
-4. **Click Convert** - Done!
+1. **Download** and set up required dependencies (see Requirements below)
+2. **Launch** `Model2Bo3.exe`
+3. **Select** your model file (NIF, etc.)
+4. **Choose** output directory
+5. **Click Convert** - Done!
+
+## 📦 Requirements
+
+### Required External Dependencies
+
+Model2Bo3 requires these external components to function properly. These are **NOT** included in the repository and must be downloaded separately:
+
+#### 1. PyNifly Library (Required)
+
+**What it is:** Python library for parsing NIF files (Fallout 4, Skyrim) with native DLL support.
+
+**How to get it:**
+1. Visit: **https://github.com/niftools/blender_niftools_addon**
+2. Download the latest release or clone the repository
+3. Copy the entire `io_scene_nifly` folder contents to: `converter/src/pynifly/`
+
+**Required files:**
+```
+converter/src/pynifly/
+├── pynifly.py
+├── niflytools.py
+├── nifdefs.py
+├── pynmathutils.py
+├── xmltools.py
+├── bgsmaterial.py
+└── NiflyDLL/
+    └── x64/
+        └── NiflyDLL.dll  ← Critical for NIF parsing
+```
+
+**Verify installation:**
+```powershell
+Test-Path "converter\src\pynifly\pynifly.py"        # Should return True
+Test-Path "converter\src\pynifly\NiflyDLL\x64\NiflyDLL.dll"  # Should return True
+```
+
+#### 2. HKX Tools (Required for Fallout 4 Skeletons)
+
+**What they are:** Tools for converting Havok HKX skeleton files to XML format.
+
+**How to get them:**
+- **hkxcmd.exe** - Search "hkxcmd Skyrim" online, available from various modding sites
+- **hkxpack-cli.jar** & **hkxpack-core.jar** - From HKXPack project
+
+**Where to place them:**
+```
+converter/tools/
+├── hkxcmd.exe
+├── hkxpack-cli.jar
+└── hkxpack-core.jar
+```
+
+**Note:** These tools are needed to extract skeleton/bone data from Fallout 4's HKX files.
+
+#### 3. Bethesda Archive Extractor (B.A.E) - For Textures
+
+**What it is:** Tool to extract textures from Fallout 4's BA2 archive files.
+
+**Why you need it:** Fallout 4 stores textures in compressed BA2 archives, not as loose files. You must extract them first.
+
+**How to use:**
+1. Download B.A.E from Nexus Mods or other modding sites
+2. Open B.A.E and navigate to your Fallout 4's Data folder
+3. Extract texture archives (e.g., `Textures - Main.ba2`)
+4. Point Model2Bo3's texture path setting to the extracted folder
+
+**Example:**
+```
+Extracted textures: C:/FO4_Extracted/Textures/
+Set in Model2Bo3 settings: texture_path = "C:/FO4_Extracted/Textures/"
+```
+
+### Optional Tools
+
+#### export2bin.exe (Black Ops 3 Modtools)
+
+**What it is:** Official BO3 tool to compile XMODEL_EXPORT to XMODEL_BIN format.
+
+**Where to get it:** Included with Call of Duty Black Ops 3 Modtools
+- Location: `steamapps/common/Call of Duty Black Ops III/bin/export2bin.exe`
+
+**How to use in Model2Bo3:**
+1. Open Settings in Model2Bo3
+2. Set "Export2Bin Path" to your export2bin.exe location
+3. Enable "Auto-Compile to BIN" for automatic compilation
+
+### Python Dependencies (For Source Users)
+
+If running from source code instead of the .exe:
+
+```bash
+cd converter
+pip install -r requirements.txt
+```
+
+**Packages:**
+- PyQt6 - GUI framework
+- Pillow - Image processing (texture conversion)
+- PyFFI - Fallback NIF parsing
+- numpy - Numerical operations
 
 ## ✨ Features
 
@@ -180,6 +281,26 @@ Settings are stored in: `config/settings.json` (created automatically)
 ```
 
 ## 🔧 Troubleshooting
+
+### Dependency Issues
+
+**"NiflyDLL.dll not found" or "Cannot import pynifly"**
+- PyNifly is not installed correctly
+- Follow PyNifly installation steps in Requirements section
+- Verify `NiflyDLL.dll` exists at: `converter/src/pynifly/NiflyDLL/x64/NiflyDLL.dll`
+- Check that all PyNifly Python files are present
+
+**"Failed to parse HKX skeleton"**
+- HKX tools are missing from `converter/tools/` folder
+- Download `hkxcmd.exe`, `hkxpack-cli.jar`, and `hkxpack-core.jar`
+- Place them in the `converter/tools/` directory
+- Ensure Java is installed for HKXPack JARs
+
+**"Textures not found" (Fallout 4)**
+- Fallout 4 textures are in BA2 archives, not loose files
+- Extract textures using Bethesda Archive Extractor (B.A.E)
+- Set Model2Bo3's texture path to the extracted texture folder
+- Do NOT point to `Fallout4/Data/Textures/` (contains only archives)
 
 ### Common Issues
 
