@@ -127,9 +127,10 @@ class SkeletonAnalyzer:
         # EMPIRICALLY DETERMINED CORRECT ROTATIONS for FO4 -> BO3
         # Mesh and bones need DIFFERENT rotations!
         
-        # All skeleton types use same rotation (tested with Alien)
+        # Default bone rotation for Fallout 4 furniture/static props
+        # (Characters may need different values - Y=90, Z=90)
         self.rotation_x = 0
-        self.rotation_y = 90
+        self.rotation_y = 0
         self.rotation_z = 90
         
         # Store separate mesh rotation (applied to vertices/normals)

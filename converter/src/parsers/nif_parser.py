@@ -137,6 +137,22 @@ class NIFParser:
             print(f"  NIF loaded successfully")
             print(f"  Shapes found: {len(nif.shapes)}")
             
+            # Debug: Print node hierarchy
+            if hasattr(nif, 'nodes') and nif.nodes:
+                print(f"  Nodes found: {len(nif.nodes)}")
+                for node_name, node in list(nif.nodes.items())[:10]:  # Show first 10
+                    if hasattr(node, 'transform'):
+                        trans = node.transform.translation if hasattr(node.transform, 'translation') else None
+                        if trans:
+                            t = (trans.x if hasattr(trans, 'x') else trans[0],
+                                 trans.y if hasattr(trans, 'y') else trans[1],
+                                 trans.z if hasattr(trans, 'z') else trans[2])
+                            # Also show parent
+                            parent_name = "None"
+                            if hasattr(node, 'parent') and node.parent and hasattr(node.parent, 'name'):
+                                parent_name = node.parent.name
+                            print(f"    Node '{node_name}' (parent: {parent_name}): translation = {t}")
+            
             # Extract skeleton from NIF
             self._extract_nifly_skeleton(nif)
             
@@ -152,6 +168,10 @@ class NIFParser:
                         continue
                     
                     print(f"  Processing shape: {shape_name}")
+                    
+                    # Debug: Print all available attributes on the shape
+                    print(f"    Shape attributes: {[attr for attr in dir(shape) if not attr.startswith('_')][:20]}")
+                    
                     self._extract_nifly_shape(nif, shape, shape_name)
             
             # NOW align skeleton with mesh (after vertices are loaded)
@@ -247,6 +267,19 @@ class NIFParser:
                 if nodes:
                     all_bone_names = set(nodes.keys())
             
+            # If STILL no bones found, check the main NIF's node hierarchy
+            # This is common for furniture/static props where nodes = bones
+            if not all_bone_names and hasattr(nif, 'nodes') and nif.nodes:
+                print(f"  No skinned bones found, using NIF node hierarchy as bones...")
+                # Use all nodes as bones - BUT skip shape nodes (those ending with :number)
+                # Shape nodes are just mesh data, the parent nodes are the actual bones
+                for node_name in nif.nodes.keys():
+                    # Skip shape nodes like "CryoPod00:0", "arm005:0", etc.
+                    # These are mesh data, not bones
+                    if ':' not in node_name:
+                        all_bone_names.add(node_name)
+                print(f"  Using {len(all_bone_names)} nodes as bones: {list(all_bone_names)[:10]}")
+            
             # If still no bones found, create default root
             if not all_bone_names:
                 print(f"  No skeleton bones found, creating default root bone")
@@ -334,6 +367,8 @@ class NIFParser:
                                 t.y if hasattr(t, 'y') else t[1],
                                 t.z if hasattr(t, 'z') else t[2]
                             )
+                            if local_translation != (0, 0, 0):
+                                print(f"    Bone '{bone_name}' local translation: {local_translation}")
                         if hasattr(lt, 'rotation'):
                             rot = lt.rotation
                             try:
@@ -378,7 +413,7 @@ class NIFParser:
                         'local_rotation': local_rotation,
                         'global_translation': global_translation,
                         'global_rotation': global_rotation,
-                        'translation': local_translation,  # Will update if parent was COM
+                        'translation': local_translation,  # Start with local, will update for root bones
                         'rotation': local_rotation,
                         'scale': scale,
                         'node': node
@@ -393,31 +428,41 @@ class NIFParser:
                     parent_name = node.parent.name if hasattr(node.parent, 'name') else None
                 
                 if parent_name and parent_name in bone_name_to_index:
-                    # Normal case: parent exists in our bone list
+                    # Normal case: parent exists in our bone list - USE LOCAL TRANSFORMS
                     bone['parent'] = bone_name_to_index[parent_name]
                     parent_count[parent_name] = parent_count.get(parent_name, 0) + 1
-                    # Keep local transform
-                    print(f"  {bone['name']}: parent={parent_name} (index {bone['parent']}), local: {bone['local_translation']}")
+                    # Use local transform (hierarchy will be applied by viewer)
+                    bone['translation'] = bone['local_translation']
+                    bone['rotation'] = bone['local_rotation']
+                    print(f"  {bone['name']}: parent={parent_name} (index {bone['parent']}), using LOCAL: {bone['local_translation']}")
                     
                 elif parent_name and ('\\' in parent_name or '/' in parent_name or parent_name in ['COM', 'Root']):
-                    # Parent is filtered out (file root, COM, etc) - subtract COM offset from global
+                    # Parent is filtered out (file root, COM, etc) - USE GLOBAL with COM offset subtracted
                     bone['parent'] = -1
                     parent_count['<filtered_parent>'] = parent_count.get('<filtered_parent>', 0) + 1
                     
-                    # CRITICAL FIX: Subtract COM offset from global position
+                    # CRITICAL FIX: Use global position minus COM offset
                     if bone['global_translation']:
                         bone['translation'] = (
                             bone['global_translation'][0] - com_offset[0],
                             bone['global_translation'][1] - com_offset[1],
                             bone['global_translation'][2] - com_offset[2]
                         )
-                        print(f"  {bone['name']}: parent filtered ({parent_name}), global {bone['global_translation']} - COM offset {com_offset} = {bone['translation']}")
+                        if bone['global_rotation']:
+                            bone['rotation'] = bone['global_rotation']
+                        print(f"  {bone['name']}: parent filtered ({parent_name}), using GLOBAL {bone['global_translation']} - COM offset {com_offset} = {bone['translation']}")
                     else:
                         print(f"  WARNING: {bone['name']} parent filtered but no global transform")
                 else:
-                    # No valid parent found - make it a root
+                    # No valid parent found - make it a root, USE GLOBAL
                     bone['parent'] = -1
-                    print(f"  {bone['name']}: no parent found, making root")
+                    if bone['global_translation']:
+                        bone['translation'] = bone['global_translation']
+                        if bone['global_rotation']:
+                            bone['rotation'] = bone['global_rotation']
+                        print(f"  {bone['name']}: no parent found, making root with GLOBAL: {bone['global_translation']}")
+                    else:
+                        print(f"  {bone['name']}: no parent found, making root with LOCAL: {bone['local_translation']}")
                 
                 del bone['node']  # Remove temporary node reference
             
@@ -515,6 +560,85 @@ class NIFParser:
         """Extract geometry from a pynifly shape"""
         base_index = len(self.data.vertices)
         
+        # CRITICAL: Get the shape's parent node transform to position it correctly
+        # In FO4 NIFs, each shape is attached to a node that has the transform
+        # We need to use GLOBAL (cumulative) transform to account for full hierarchy
+        shape_offset = (0, 0, 0)
+        shape_rotation = None
+        
+        # Try to find this shape's node in the node hierarchy
+        if hasattr(nif, 'nodes') and nif.nodes:
+            # First check if shape name has a parent node (e.g., "arm005:0" -> parent is "arm005")
+            base_name = shape_name.split(':')[0] if ':' in shape_name else shape_name
+            
+            # Try the parent node first (this usually has the transform)
+            if base_name in nif.nodes and base_name != shape_name:
+                node = nif.nodes[base_name]
+                # Use GLOBAL transform to get cumulative position including all ancestors
+                if hasattr(node, 'global_transform') and hasattr(node.global_transform, 'translation'):
+                    t = node.global_transform.translation
+                    shape_offset = (
+                        t.x if hasattr(t, 'x') else t[0],
+                        t.y if hasattr(t, 'y') else t[1],
+                        t.z if hasattr(t, 'z') else t[2]
+                    )
+                    print(f"    Using PARENT node '{base_name}' GLOBAL transform: {shape_offset}")
+                elif hasattr(node, 'transform') and hasattr(node.transform, 'translation'):
+                    # Fallback to local if global not available
+                    t = node.transform.translation
+                    shape_offset = (
+                        t.x if hasattr(t, 'x') else t[0],
+                        t.y if hasattr(t, 'y') else t[1],
+                        t.z if hasattr(t, 'z') else t[2]
+                    )
+                    print(f"    Using PARENT node '{base_name}' LOCAL transform (no global): {shape_offset}")
+                if hasattr(node, 'transform') and hasattr(node.transform, 'rotation'):
+                    shape_rotation = node.transform.rotation
+            # Otherwise check the shape node itself
+            elif shape_name in nif.nodes:
+                node = nif.nodes[shape_name]
+                
+                # If the shape node has zero translation, use its parent's GLOBAL transform
+                node_has_translation = False
+                if hasattr(node, 'transform') and hasattr(node.transform, 'translation'):
+                    t = node.transform.translation
+                    local_trans = (
+                        t.x if hasattr(t, 'x') else t[0],
+                        t.y if hasattr(t, 'y') else t[1],
+                        t.z if hasattr(t, 'z') else t[2]
+                    )
+                    if local_trans != (0, 0, 0):
+                        shape_offset = local_trans
+                        node_has_translation = True
+                        print(f"    Using shape node '{shape_name}' LOCAL transform: {shape_offset}")
+                
+                # If shape node has (0,0,0), use parent's GLOBAL transform
+                if not node_has_translation and hasattr(node, 'parent') and node.parent:
+                    parent_name = node.parent.name if hasattr(node.parent, 'name') else None
+                    if parent_name and parent_name in nif.nodes:
+                        parent_node = nif.nodes[parent_name]
+                        # Use global transform to get cumulative position
+                        if hasattr(parent_node, 'global_transform') and hasattr(parent_node.global_transform, 'translation'):
+                            t = parent_node.global_transform.translation
+                            shape_offset = (
+                                t.x if hasattr(t, 'x') else t[0],
+                                t.y if hasattr(t, 'y') else t[1],
+                                t.z if hasattr(t, 'z') else t[2]
+                            )
+                            print(f"    Using parent '{parent_name}' GLOBAL transform: {shape_offset}")
+                        elif hasattr(parent_node, 'transform') and hasattr(parent_node.transform, 'translation'):
+                            # Fallback to local
+                            t = parent_node.transform.translation
+                            shape_offset = (
+                                t.x if hasattr(t, 'x') else t[0],
+                                t.y if hasattr(t, 'y') else t[1],
+                                t.z if hasattr(t, 'z') else t[2]
+                            )
+                            print(f"    Using parent '{parent_name}' LOCAL transform: {shape_offset}")
+                
+                if hasattr(node, 'transform') and hasattr(node.transform, 'rotation'):
+                    shape_rotation = node.transform.rotation
+        
         # Try to get skin transform (aligns skeleton to mesh)
         skin_offset = (0, 0, 0)
         if hasattr(shape, 'skin_transform'):
@@ -531,28 +655,20 @@ class NIFParser:
             except:
                 pass
         
-        # Also check shape transform
-        shape_offset = (0, 0, 0)
-        if hasattr(shape, 'global_transform'):
-            gt = shape.global_transform
-            if hasattr(gt, 'translation'):
-                t = gt.translation
-                shape_offset = (
-                    t.x if hasattr(t, 'x') else t[0],
-                    t.y if hasattr(t, 'y') else t[1],
-                    t.z if hasattr(t, 'z') else t[2]
-                )
-                if shape_offset != (0, 0, 0):
-                    print(f"    Shape has transform offset: {shape_offset}")
-        
         # Store skin offset for bone adjustment
         if skin_offset != (0, 0, 0):
             self._skin_offset = skin_offset
         
-        # Get vertices - local bone transforms match mesh coordinate space
+        # Get vertices and apply shape transform to position them correctly
         verts = shape.verts
         for vert in verts:
-            self.data.vertices.append((vert[0], vert[1], vert[2]))
+            # Apply shape's global transform to position this body part correctly
+            transformed_vert = (
+                vert[0] + shape_offset[0],
+                vert[1] + shape_offset[1],
+                vert[2] + shape_offset[2]
+            )
+            self.data.vertices.append(transformed_vert)
         
         # Get normals
         normals = shape.normals
@@ -587,10 +703,49 @@ class NIFParser:
                 base_index + tri[2]
             ))
         
-        # Track material index for each triangle (for layered materials)
-        # PyNifly provides partition_tris: a list of partition indices, one per triangle
-        material_index = len(self.data.materials)  # This material's index
+        # Extract skin weights from PyNifly
+        num_verts = len(verts)
+        self._extract_nifly_skin_weights(shape, base_index, num_verts)
         
+        # Extract material info FIRST, before assigning to faces
+        material = {
+            'name': shape_name,
+            'shader': 'Phong',
+            'diffuse_texture': '',
+            'normal_texture': '',
+            'specular_color': (0.5, 0.5, 0.5, 1.0)
+        }
+        
+        # Try to get textures from shader - shape.shader.textures is a dict with string keys
+        if hasattr(shape, 'shader') and hasattr(shape.shader, 'textures'):
+            try:
+                textures = shape.shader.textures
+                # Common texture slots: 'Diffuse', 'Normal', 'Specular', 'Glow', etc.
+                if 'Diffuse' in textures:
+                    material['diffuse_texture'] = textures['Diffuse']
+                if 'Normal' in textures:
+                    material['normal_texture'] = textures['Normal']
+            except Exception as e:
+                print(f"⚠ Could not extract textures from {shape_name}: {e}")
+        
+        # Check if we already have a material with the same textures
+        # This prevents duplicate materials for shapes using the same texture
+        material_index = None
+        for idx, existing_mat in enumerate(self.data.materials):
+            if (existing_mat['diffuse_texture'] == material['diffuse_texture'] and
+                existing_mat['normal_texture'] == material['normal_texture']):
+                # Reuse existing material
+                material_index = idx
+                print(f"    Reusing existing material {idx} (same textures)")
+                break
+        
+        # If no matching material found, create a new one
+        if material_index is None:
+            material_index = len(self.data.materials)
+            self.data.materials.append(material)
+            print(f"    Created new material {material_index}: diffuse={os.path.basename(material['diffuse_texture']) if material['diffuse_texture'] else 'none'}")
+        
+        # NOW assign material index to all faces in this shape
         # Check if this shape has partitions (layered materials)
         if hasattr(shape, 'partition_tris') and hasattr(shape, 'partitions'):
             partition_tris = shape.partition_tris
@@ -613,33 +768,6 @@ class NIFParser:
             # No partitions - assign same material to all faces
             for _ in tris:
                 self.data.face_materials.append(material_index)
-        
-        # Extract skin weights from PyNifly
-        num_verts = len(verts)
-        self._extract_nifly_skin_weights(shape, base_index, num_verts)
-        
-        # Extract material info
-        material = {
-            'name': shape_name,
-            'shader': 'Phong',
-            'diffuse_texture': '',
-            'normal_texture': '',
-            'specular_color': (0.5, 0.5, 0.5, 1.0)
-        }
-        
-        # Try to get textures from shader - shape.shader.textures is a dict with string keys
-        if hasattr(shape, 'shader') and hasattr(shape.shader, 'textures'):
-            try:
-                textures = shape.shader.textures
-                # Common texture slots: 'Diffuse', 'Normal', 'Specular', 'Glow', etc.
-                if 'Diffuse' in textures:
-                    material['diffuse_texture'] = textures['Diffuse']
-                if 'Normal' in textures:
-                    material['normal_texture'] = textures['Normal']
-            except Exception as e:
-                print(f"⚠ Could not extract textures from {shape_name}: {e}")
-        
-        self.data.materials.append(material)
     
     def _extract_nifly_skin_weights(self, shape, base_index: int, num_verts: int):
         """Extract skin weights from PyNifly shape"""
