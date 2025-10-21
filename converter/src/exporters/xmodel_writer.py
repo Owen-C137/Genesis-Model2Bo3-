@@ -248,31 +248,36 @@ class XModelWriter:
         Convert local bone transforms to global (world-space) transforms.
         BO3 expects OFFSET to be global position, not parent-relative.
         
-        If bones already have 'global_translation' and 'global_rotation' from the parser,
-        use those directly instead of recalculating.
+        CRITICAL: The parser may provide bones that are already in global space
+        (when their original parent was filtered out). These bones have parent=-1
+        and bone['translation'] is ALREADY their global position. Do NOT transform them again!
         
         Args:
-            bones: List of bones with local transforms
+            bones: List of bones with transforms (may be local or global)
             
         Returns:
             List of bones with global transforms added
         """
         import numpy as np
         
-        # ALWAYS compute global transforms from the bone['translation'] and bone['rotation'] values
-        # The parser provides local transforms for bones with parents, and global for root bones
-        # We need to compute the full global hierarchy for XMODEL OFFSET values
         print("  Computing global transforms for XMODEL (local→global with hierarchy)")
         
         # Create index lookup
         bone_by_index = {bone['index']: bone for bone in bones}
+        
+        # Count how many bones are already in global space vs need hierarchy computation
+        root_bones = sum(1 for bone in bones if bone['parent'] == -1)
+        child_bones = len(bones) - root_bones
+        print(f"    {root_bones} root bones (already global), {child_bones} child bones (need hierarchy)")
         
         # Add global transforms to each bone
         for bone in bones:
             parent_idx = bone['parent']
             
             if parent_idx == -1:
-                # Root bone - global == local
+                # Root bone - translation/rotation are ALREADY in global space from parser
+                # This happens when bones had their parent filtered out (like COM, file root, etc)
+                # DO NOT TRANSFORM AGAIN - just use as-is
                 bone['global_translation'] = bone['translation']
                 bone['global_rotation'] = bone['rotation']
             else:
@@ -321,9 +326,11 @@ class XModelWriter:
             f.write("X 1.000000, 0.000000, 0.000000\n")
             f.write("Y 0.000000, 1.000000, 0.000000\n")
             f.write("Z 0.000000, 0.000000, 1.000000\n\n")
+            self.bones_with_global = []  # Store empty list for _write_vertices
         else:
             # Compute global transforms from local transforms
             bones_with_global = self._compute_global_transforms(data.bones)
+            self.bones_with_global = bones_with_global  # Store for _write_vertices
             
             # Write bone count and hierarchy
             f.write(f"NUMBONES {len(bones_with_global)}\n")

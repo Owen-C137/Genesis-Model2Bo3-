@@ -4,12 +4,27 @@ Extracts geometry, skeleton, and material data from .nif files
 """
 
 import os
+import sys
 import numpy as np
 from typing import Dict, List, Tuple, Optional
 
+# Fix Unicode output encoding for Windows console
+# Only wrap if we have a real stdout/stderr with buffer attribute (not GUI's custom wrapper)
+if sys.platform == 'win32':
+    import io
+    if hasattr(sys.stdout, 'buffer'):
+        try:
+            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        except:
+            pass  # GUI or other custom stdout, skip wrapping
+    if hasattr(sys.stderr, 'buffer'):
+        try:
+            sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+        except:
+            pass  # GUI or other custom stderr, skip wrapping
+
 # Try pynifly first (better FO4 support), fallback to PyFFI
 try:
-    import sys
     import os
     import importlib.util
     
@@ -271,13 +286,20 @@ class NIFParser:
             # This is common for furniture/static props where nodes = bones
             if not all_bone_names and hasattr(nif, 'nodes') and nif.nodes:
                 print(f"  No skinned bones found, using NIF node hierarchy as bones...")
-                # Use all nodes as bones - BUT skip shape nodes (those ending with :number)
-                # Shape nodes are just mesh data, the parent nodes are the actual bones
+                # Use all nodes as bones - BUT skip:
+                # 1. Shape nodes (those ending with :number) - these are mesh data
+                # 2. Special nodes like "OrderedRenderingNode" - these are engine-specific, not bones
+                special_node_names = {'OrderedRenderingNode', 'RenderingNode', 'BSFadeNode'}
                 for node_name in nif.nodes.keys():
                     # Skip shape nodes like "CryoPod00:0", "arm005:0", etc.
                     # These are mesh data, not bones
-                    if ':' not in node_name:
-                        all_bone_names.add(node_name)
+                    if ':' in node_name:
+                        continue
+                    # Skip special engine nodes
+                    if node_name in special_node_names:
+                        print(f"  Skipping special node '{node_name}' (not a bone)")
+                        continue
+                    all_bone_names.add(node_name)
                 print(f"  Using {len(all_bone_names)} nodes as bones: {list(all_bone_names)[:10]}")
             
             # If still no bones found, create default root
@@ -307,6 +329,24 @@ class NIFParser:
             # Build bone hierarchy - need to include parent bones too
             bones_to_include = set(all_bone_names)
             
+            # Special nodes to skip (not actual bones)
+            special_node_names = {'OrderedRenderingNode', 'RenderingNode', 'BSFadeNode'}
+            
+            # Track offset from removed special nodes (we'll need to subtract this from shapes)
+            self._removed_node_offset = (0, 0, 0)
+            for special_name in special_node_names:
+                if special_name in nodes:
+                    special_node = nodes[special_name]
+                    if hasattr(special_node, 'transform') and hasattr(special_node.transform, 'translation'):
+                        t = special_node.transform.translation
+                        self._removed_node_offset = (
+                            t.x if hasattr(t, 'x') else t[0],
+                            t.y if hasattr(t, 'y') else t[1],
+                            t.z if hasattr(t, 'z') else t[2]
+                        )
+                        print(f"  Removed special node '{special_name}' at offset: {self._removed_node_offset}")
+                        break
+            
             # Add all parent bones recursively
             for bone_name in list(bones_to_include):
                 if bone_name in nodes:
@@ -316,10 +356,13 @@ class NIFParser:
                     while hasattr(current, 'parent') and current.parent:
                         parent_name = current.parent.name if hasattr(current.parent, 'name') else None
                         if parent_name and parent_name in nodes:
-                            # Skip file root nodes and engine bones we don't want
+                            # Skip file root nodes, engine bones, and special nodes we don't want
                             if ('\\' not in parent_name and '/' not in parent_name and
-                                parent_name not in ['skeleton.nif', 'COM', 'Root']):
+                                parent_name not in ['skeleton.nif', 'COM', 'Root'] and
+                                parent_name not in special_node_names):
                                 bones_to_include.add(parent_name)
+                            elif parent_name in special_node_names:
+                                print(f"  Skipping parent node '{parent_name}' (special node, not a bone)")
                             current = current.parent
                         else:
                             break
@@ -558,22 +601,53 @@ class NIFParser:
     
     def _extract_nifly_shape(self, nif, shape, shape_name: str):
         """Extract geometry from a pynifly shape"""
+        
+        # Filter out FX/effect meshes that shouldn't be exported
+        # These are visual effects like water streams, refraction, particles, etc.
+        # Use specific FX mesh name patterns to avoid false positives
+        fx_patterns = [
+            'shinestream', 'refractstream', 'waterstream', 
+            'particle', 'emitter', 
+            'fxemit', 'fxlight', 'fxglow',
+            'lighthelper', 'addonnode'
+        ]
+        shape_name_lower = shape_name.lower()
+        for pattern in fx_patterns:
+            if pattern in shape_name_lower:
+                print(f"  Skipping FX mesh: {shape_name} (matches pattern '{pattern}')")
+                return
+        
         base_index = len(self.data.vertices)
         
         # CRITICAL: Get the shape's parent node transform to position it correctly
-        # In FO4 NIFs, each shape is attached to a node that has the transform
-        # We need to use GLOBAL (cumulative) transform to account for full hierarchy
+        # ONLY add offset if the parent node is a BONE (part of skeleton)
+        # If parent is just a grouping node, PyNifly already has vertices in correct space
         shape_offset = (0, 0, 0)
         shape_rotation = None
+        shape_parent_is_bone = False
+        shape_parent_bone_name = None  # Track which bone this shape should be bound to
+        
+        # Build set of bone names for quick lookup
+        bone_names = set(bone['name'] for bone in self.data.bones) if self.data.bones else set()
         
         # Try to find this shape's node in the node hierarchy
         if hasattr(nif, 'nodes') and nif.nodes:
-            # First check if shape name has a parent node (e.g., "arm005:0" -> parent is "arm005")
+            # Try to find a node for this shape
+            # Priority: 1) Base name if shape has ":" (e.g., "arm005" from "arm005:0")
+            #          2) Full shape name (e.g., "TerminalConsoleOn:0")
             base_name = shape_name.split(':')[0] if ':' in shape_name else shape_name
             
-            # Try the parent node first (this usually has the transform)
+
+            
+            # First try the BASE name if it's different from full shape name (e.g., "arm005:0" -> check "arm005")
             if base_name in nif.nodes and base_name != shape_name:
                 node = nif.nodes[base_name]
+                
+                # Check if this base node is a BONE
+                shape_parent_is_bone = base_name in bone_names
+                if shape_parent_is_bone:
+                    shape_parent_bone_name = base_name
+                
                 # Use GLOBAL transform to get cumulative position including all ancestors
                 if hasattr(node, 'global_transform') and hasattr(node.global_transform, 'translation'):
                     t = node.global_transform.translation
@@ -582,7 +656,7 @@ class NIFParser:
                         t.y if hasattr(t, 'y') else t[1],
                         t.z if hasattr(t, 'z') else t[2]
                     )
-                    print(f"    Using PARENT node '{base_name}' GLOBAL transform: {shape_offset}")
+                    print(f"    Using base node '{base_name}' GLOBAL transform: {shape_offset}")
                 elif hasattr(node, 'transform') and hasattr(node.transform, 'translation'):
                     # Fallback to local if global not available
                     t = node.transform.translation
@@ -591,15 +665,29 @@ class NIFParser:
                         t.y if hasattr(t, 'y') else t[1],
                         t.z if hasattr(t, 'z') else t[2]
                     )
-                    print(f"    Using PARENT node '{base_name}' LOCAL transform (no global): {shape_offset}")
+                    print(f"    Using base node '{base_name}' LOCAL transform: {shape_offset}")
                 if hasattr(node, 'transform') and hasattr(node.transform, 'rotation'):
                     shape_rotation = node.transform.rotation
-            # Otherwise check the shape node itself
+            
+            # Otherwise check the full shape name
             elif shape_name in nif.nodes:
                 node = nif.nodes[shape_name]
                 
-                # If the shape node has zero translation, use its parent's GLOBAL transform
-                node_has_translation = False
+                # Check if the shape node itself is a bone OR if its parent is a bone
+                shape_node_is_bone = shape_name in bone_names
+                parent_name = node.parent.name if hasattr(node, 'parent') and node.parent and hasattr(node.parent, 'name') else None
+                parent_is_bone = parent_name in bone_names if parent_name else False
+                shape_parent_is_bone = shape_node_is_bone or parent_is_bone
+                
+                # Store the parent bone name for vertex binding
+                if shape_node_is_bone:
+                    shape_parent_bone_name = shape_name
+                elif parent_is_bone:
+                    shape_parent_bone_name = parent_name
+                
+
+                
+                # Use the shape's LOCAL transform
                 if hasattr(node, 'transform') and hasattr(node.transform, 'translation'):
                     t = node.transform.translation
                     local_trans = (
@@ -609,11 +697,18 @@ class NIFParser:
                     )
                     if local_trans != (0, 0, 0):
                         shape_offset = local_trans
-                        node_has_translation = True
-                        print(f"    Using shape node '{shape_name}' LOCAL transform: {shape_offset}")
+                        if parent_is_bone:
+                            print(f"    Using shape '{shape_name}' LOCAL transform (parent is bone): {shape_offset}")
+                        else:
+                            print(f"    Using shape '{shape_name}' LOCAL transform: {shape_offset}")
+                    else:
+                        if parent_is_bone:
+                            print(f"    Shape '{shape_name}' at (0,0,0) relative to bone parent - using NO offset")
+                        else:
+                            print(f"    Shape '{shape_name}' at (0,0,0) - using NO offset")
                 
-                # If shape node has (0,0,0), use parent's GLOBAL transform
-                if not node_has_translation and hasattr(node, 'parent') and node.parent:
+                # OLD LOGIC REMOVED
+                if False and hasattr(node, 'parent') and node.parent:
                     parent_name = node.parent.name if hasattr(node.parent, 'name') else None
                     if parent_name and parent_name in nif.nodes:
                         parent_node = nif.nodes[parent_name]
@@ -639,6 +734,90 @@ class NIFParser:
                 if hasattr(node, 'transform') and hasattr(node.transform, 'rotation'):
                     shape_rotation = node.transform.rotation
         
+        # FALLBACK: If shape has no parent bone (orphan shape), try to find a related mesh
+        # This handles shapes like ScreenType:0 (layer) that should bind to same bone as Screen:0 (base)
+        if not shape_parent_bone_name:
+            print(f"    Shape '{shape_name}' has no parent bone, looking for related mesh")
+            found_related = False
+            
+            # Try to find a base mesh name by removing common suffixes
+            # e.g., "ScreenType:0" -> look for "Screen:0" or "Screen"
+            potential_base_names = []
+            
+            # Remove "Type" suffix if present
+            if "Type" in base_name:
+                potential_base_names.append(base_name.replace("Type", ""))
+            
+            # Try just the base word before "Type"
+            if "Type" in shape_name:
+                base_word = shape_name.split("Type")[0]
+                potential_base_names.append(base_word)
+                # Also try with layer number
+                if ":" in shape_name:
+                    layer_num = shape_name.split(":")[-1]
+                    potential_base_names.append(f"{base_word}:{layer_num}")
+            
+            print(f"    Checking for related meshes: {potential_base_names}")
+            
+            # Find the nearest bone to this shape based on distance
+            # This works for orphan shapes that don't have a parent bone
+            if self.data.bones and shape_offset != (0, 0, 0):
+                print(f"    Finding nearest bone to shape at position {shape_offset}")
+                
+                # First compute global positions for all bones
+                import math
+                bone_global_positions = {}
+                for bone in self.data.bones:
+                    if bone['parent'] == -1:
+                        # Root bone - translation is already global
+                        bone_global_positions[bone['name']] = bone['translation']
+                    else:
+                        # Child bone - need to compute global from parent chain
+                        global_pos = list(bone['translation'])
+                        parent_idx = bone['parent']
+                        while parent_idx >= 0:
+                            parent_bone = self.data.bones[parent_idx]
+                            global_pos[0] += parent_bone['translation'][0]
+                            global_pos[1] += parent_bone['translation'][1]
+                            global_pos[2] += parent_bone['translation'][2]
+                            parent_idx = parent_bone['parent']
+                        bone_global_positions[bone['name']] = tuple(global_pos)
+                
+                # Calculate distance to each bone's global position
+                nearest_bone = None
+                nearest_distance = float('inf')
+                
+                for bone_name, bone_pos in bone_global_positions.items():
+                    # Calculate 3D distance
+                    dx = shape_offset[0] - bone_pos[0]
+                    dy = shape_offset[1] - bone_pos[1]
+                    dz = shape_offset[2] - bone_pos[2]
+                    distance = math.sqrt(dx*dx + dy*dy + dz*dz)
+                    
+                    if distance < nearest_distance:
+                        nearest_distance = distance
+                        nearest_bone = bone_name
+                
+                if nearest_bone:
+                    shape_parent_bone_name = nearest_bone
+                    shape_parent_is_bone = True
+                    print(f"    Nearest bone is '{nearest_bone}' at distance {nearest_distance:.2f} units")
+                    found_related = True
+                    
+                    # Subtract removed node offset from shape position
+                    # Orphan shapes were positioned relative to removed special nodes
+                    if hasattr(self, '_removed_node_offset') and self._removed_node_offset != (0, 0, 0):
+                        old_offset = shape_offset
+                        shape_offset = (
+                            shape_offset[0] - self._removed_node_offset[0],
+                            shape_offset[1] - self._removed_node_offset[1],
+                            shape_offset[2] - self._removed_node_offset[2]
+                        )
+                        print(f"    Adjusted shape offset (removed node at {self._removed_node_offset}): {old_offset} → {shape_offset}")
+            
+            if not found_related:
+                print(f"    No related mesh found, will bind to root bone")
+        
         # Try to get skin transform (aligns skeleton to mesh)
         skin_offset = (0, 0, 0)
         if hasattr(shape, 'skin_transform'):
@@ -659,16 +838,28 @@ class NIFParser:
         if skin_offset != (0, 0, 0):
             self._skin_offset = skin_offset
         
-        # Get vertices and apply shape transform to position them correctly
+        # Check if this shape has skin weights (skinned mesh)
+        has_skin_weights = hasattr(shape, 'bone_weights') and shape.bone_weights and len(shape.bone_weights) > 0
+        
+        # Get vertices and apply transform if shape has local translation
+        # Skinned meshes already have vertices in bind pose and don't need offsets
         verts = shape.verts
+        
         for vert in verts:
-            # Apply shape's global transform to position this body part correctly
-            transformed_vert = (
-                vert[0] + shape_offset[0],
-                vert[1] + shape_offset[1],
-                vert[2] + shape_offset[2]
-            )
-            self.data.vertices.append(transformed_vert)
+            if has_skin_weights:
+                # Skinned mesh: vertices already in bind pose, use as-is
+                self.data.vertices.append((vert[0], vert[1], vert[2]))
+            elif shape_offset != (0, 0, 0):
+                # Apply shape's local transform
+                transformed_vert = (
+                    vert[0] + shape_offset[0],
+                    vert[1] + shape_offset[1],
+                    vert[2] + shape_offset[2]
+                )
+                self.data.vertices.append(transformed_vert)
+            else:
+                # No offset needed
+                self.data.vertices.append((vert[0], vert[1], vert[2]))
         
         # Get normals
         normals = shape.normals
@@ -705,7 +896,7 @@ class NIFParser:
         
         # Extract skin weights from PyNifly
         num_verts = len(verts)
-        self._extract_nifly_skin_weights(shape, base_index, num_verts)
+        self._extract_nifly_skin_weights(shape, base_index, num_verts, shape_parent_bone_name)
         
         # Extract material info FIRST, before assigning to faces
         material = {
@@ -769,8 +960,15 @@ class NIFParser:
             for _ in tris:
                 self.data.face_materials.append(material_index)
     
-    def _extract_nifly_skin_weights(self, shape, base_index: int, num_verts: int):
-        """Extract skin weights from PyNifly shape"""
+    def _extract_nifly_skin_weights(self, shape, base_index: int, num_verts: int, parent_bone_name: str = None):
+        """Extract skin weights from PyNifly shape
+        
+        Args:
+            shape: PyNifly shape object
+            base_index: Starting vertex index for this shape
+            num_verts: Number of vertices in this shape
+            parent_bone_name: Name of the bone this shape is parented to (for rigid binding)
+        """
         # Initialize empty weights for all vertices in this shape
         vertex_weights = [[] for _ in range(num_verts)]
         
@@ -818,16 +1016,39 @@ class NIFParser:
                 
                 print(f"    Extracted weights for {weights_found}/{num_verts} vertices")
             else:
-                print(f"    No skin weights found, binding all vertices to root bone")
-                # Bind all vertices to root bone
+                # No skin weights - this is rigid geometry, bind to parent bone
+                # Find which bone index to bind to
+                bone_idx = 0  # Default to root
+                if parent_bone_name:
+                    # Find the bone index for the parent bone
+                    for idx, bone in enumerate(self.data.bones):
+                        if bone['name'] == parent_bone_name:
+                            bone_idx = idx
+                            print(f"    No skin weights found, binding all vertices to parent bone '{parent_bone_name}' (index {bone_idx})")
+                            break
+                    else:
+                        # Parent bone not found in bone list!
+                        bone_list_debug = [(idx, b['name']) for idx, b in enumerate(self.data.bones)]
+                        print(f"    WARNING: Parent bone '{parent_bone_name}' not found in bone list, binding to root (index 0)")
+                        print(f"    Available bones: {bone_list_debug}")
+                else:
+                    print(f"    No skin weights found, binding all vertices to root bone (index 0)")
+                
+                # Bind all vertices to the determined bone
                 for vert_idx in range(num_verts):
-                    vertex_weights[vert_idx] = [(0, 1.0)]
+                    vertex_weights[vert_idx] = [(bone_idx, 1.0)]
         
         except Exception as e:
             print(f"    Warning: Failed to extract skin weights: {e}")
-            # Fallback: bind all to root
+            # Fallback: bind to parent bone if available, otherwise root
+            bone_idx = 0
+            if parent_bone_name:
+                for idx, bone in enumerate(self.data.bones):
+                    if bone['name'] == parent_bone_name:
+                        bone_idx = idx
+                        break
             for vert_idx in range(num_verts):
-                vertex_weights[vert_idx] = [(0, 1.0)]
+                vertex_weights[vert_idx] = [(bone_idx, 1.0)]
         
         # Add to global skin weights list
         self.data.skin_weights.extend(vertex_weights)
